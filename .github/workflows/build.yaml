@@ -1,10 +1,13 @@
-name: "nix-build"
 on:
   pull_request:
   push:
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-20.04, macos-10.15]
+    name: "nix-build"
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v2
       with:
