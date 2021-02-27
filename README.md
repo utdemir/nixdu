@@ -33,11 +33,38 @@ Keybindings:
   q/Esc:          : Quit / close modal
   w               : Open why-depends mode
   /               : Open search mode
-  i               : Toggle modeline
+  s               : Change sort order
   ?               : Show help
 ```
 
-[home-manager]: https://github.com/rycee/home-manager
+### Glossary
+
+* **NAR Size**: Size of the store path itself.
+* **Closure size**: Total size of the store path and all its transitive dependencies.
+* **Added size**:  Size of the store path, and all its _unique_ transitive
+  dependencies. In other words, the cost of having that store path on top
+  of all other paths. See [issue #14] for a better explanation.
+
+[issue #14]: https://github.com/utdemir/nix-tree/issues/14
+
+### Tips
+
+`nix-build` prints built paths to stdout, which can be piped conveniently
+with `| xargs -o nix-tree`. Examples:
+
+```bash
+# Output of a local derivation
+nix-build . --no-out-link | xargs -o nix-tree
+
+# Build time dependencies (passing a `.drv` path)
+nix-instantiate --no-out-link | xargs -o nix-tree
+
+# Dependencies from shell.nix
+nix-build shell.nix -A inputDerivation | xargs -o nix-tree
+
+# All outputs of a derivation in nixpkgs:
+nix-build '<nixpkgs>' -A openssl.all --no-out-link | xargs -o nix-tree
+```
 
 ## Hacking
 

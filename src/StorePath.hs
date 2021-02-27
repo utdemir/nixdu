@@ -1,20 +1,9 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-
 module StorePath
   ( StoreName (..),
     storeNameToPath,
     storeNameToText,
     storeNameToShortText,
+    storeNameToSplitShortText,
     StorePath (..),
     StoreEnv (..),
     withStoreEnv,
@@ -28,13 +17,13 @@ where
 
 import Control.Monad (fail)
 import Data.Aeson (FromJSON (..), Value (..), decode, (.:))
+import qualified Data.ByteString.Lazy as BL
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 import Data.List (partition)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
-import Protolude
 import System.FilePath.Posix (splitDirectories)
 import System.Process.Typed (proc, readProcessStdout_)
 
@@ -56,7 +45,13 @@ storeNameToPath :: StoreName a -> FilePath
 storeNameToPath (StoreName sn) = "/nix/store/" <> toS sn
 
 storeNameToShortText :: StoreName a -> Text
-storeNameToShortText = T.drop 1 . T.dropWhile (/= '-') . storeNameToText
+storeNameToShortText = snd . storeNameToSplitShortText
+
+storeNameToSplitShortText :: StoreName a -> (Text, Text)
+storeNameToSplitShortText txt =
+  case T.span (/= '-') . T.pack $ storeNameToPath txt of
+    (f, s) | Just (c, s'') <- T.uncons s -> (T.snoc f c, s'')
+    e -> e
 
 --------------------------------------------------------------------------------
 
@@ -72,30 +67,42 @@ instance (NFData a, NFData b) => NFData (StorePath s a b)
 
 mkStorePaths :: NonEmpty (StoreName s) -> IO [StorePath s (StoreName s) ()]
 mkStorePaths names = do
+  -- See: https://github.com/utdemir/nix-tree/issues/12
+  --
+  -- > In Nix < 2.4, when you pass a .drv to path-info, it returns information about the store
+  -- > derivation. However, when you do the same in 2.4, it "resolves" it and works on
+  -- > the output of given derivation; to actually work on the derivation you need to pass
+  -- > --derivation.
+  isAtLeastNix24 <- (>= Just "2.4") <$> getNixVersion
   let (derivations, outputs) =
         partition
           (\i -> ".drv" `T.isSuffixOf` storeNameToText i)
           (NE.toList names)
   (++)
     <$> maybe (return []) (getPathInfo False) (NE.nonEmpty outputs)
-    <*> maybe (return []) (getPathInfo True) (NE.nonEmpty derivations)
+    <*> maybe (return []) (getPathInfo (True && isAtLeastNix24)) (NE.nonEmpty derivations)
   where
-    getPathInfo :: Bool -> NonEmpty (StoreName s) -> IO [StorePath s (StoreName s) ()]
-    getPathInfo isDrv names = do
-      infos <-
-        decode @[NixPathInfoResult]
-          <$> readProcessStdout_
-            ( proc
-                "nix"
-                ( ["path-info", "--recursive", "--json"]
-                    ++ (if isDrv then ["--derivation"] else [])
-                    ++ map storeNameToPath (toList names)
-                )
-            )
-          >>= maybe (fail "Failed parsing nix path-info output.") return
-          >>= mapM assertValidInfo
-      mapM infoToStorePath infos
+    getNixVersion :: IO (Maybe Text)
+    getNixVersion = do
+      out <- decodeUtf8 . BL.toStrict <$> readProcessStdout_ (proc "nix" ["--version"])
+      return . lastMay $ T.splitOn " " out
 
+getPathInfo :: Bool -> NonEmpty (StoreName s) -> IO [StorePath s (StoreName s) ()]
+getPathInfo isDrv names = do
+  infos <-
+    decode @[NixPathInfoResult]
+      <$> readProcessStdout_
+        ( proc
+            "nix"
+            ( ["path-info", "--recursive", "--json"]
+                ++ (if isDrv then ["--derivation"] else [])
+                ++ map storeNameToPath (toList names)
+            )
+        )
+      >>= maybe (fail "Failed parsing nix path-info output.") return
+      >>= mapM assertValidInfo
+  mapM infoToStorePath infos
+  where
     infoToStorePath NixPathInfo {npiPath, npiNarSize, npiReferences} = do
       name <- mkStoreNameIO npiPath
       refs <- filter (/= name) <$> mapM mkStoreNameIO npiReferences
@@ -111,7 +118,8 @@ mkStorePaths names = do
         (fail $ "Failed parsing Nix store path: " ++ show p)
         return
         (mkStoreName p)
-    assertValidInfo (NixPathInfoValid pi) = return pi
+
+    assertValidInfo (NixPathInfoValid pathinfo) = return pathinfo
     assertValidInfo (NixPathInfoInvalid path) =
       fail $ "Invalid path: " ++ path ++ ". Inconsistent /nix/store or ongoing GC."
 
@@ -210,8 +218,8 @@ seBottomUp f StoreEnv {sePaths, seRoots} =
         )
         (StorePath s (StoreName s) b)
     go name = do
-      bs <- gets snd
-      case name `HM.lookup` bs of
+      processed <- gets snd
+      case name `HM.lookup` processed of
         Just sp -> return sp
         Nothing -> do
           sp@StorePath {spName, spRefs} <- unsafeLookup name <$> gets fst

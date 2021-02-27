@@ -1,10 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE UnboxedTuples #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-
 module InvertedIndex
   ( InvertedIndex,
     iiFromList,
@@ -17,7 +10,6 @@ import Data.List (zip3)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
-import Protolude
 
 data InvertedIndex = InvertedIndex
   { iiElems :: Set Text,
@@ -25,7 +17,7 @@ data InvertedIndex = InvertedIndex
     iiBigrams :: Map (Char, Char) (Set Text),
     iiTrigrams :: Map (Char, Char, Char) (Set Text)
   }
-  deriving (Generic)
+  deriving (Generic, Show)
 
 instance NFData InvertedIndex
 
@@ -44,7 +36,7 @@ iiInsert txt InvertedIndex {iiElems, iiUnigrams, iiBigrams, iiTrigrams} =
         orig
         (setToMap (Set.singleton txt) chrs)
 
-iiFromList :: [Text] -> InvertedIndex
+iiFromList :: Foldable f => f Text -> InvertedIndex
 iiFromList =
   foldl
     (flip iiInsert)
@@ -54,15 +46,15 @@ setToMap :: v -> Set k -> Map k v
 setToMap v = Map.fromDistinctAscList . map (,v) . Set.toAscList
 
 unigramsOf :: Text -> Set Char
-unigramsOf txt = Set.fromList $ Text.unpack txt
+unigramsOf = Set.fromList . Text.unpack . Text.toLower
 
 bigramsOf :: Text -> Set (Char, Char)
-bigramsOf txt = case Text.unpack txt of
+bigramsOf txt = case Text.unpack (Text.toLower txt) of
   p1@(_ : p2) -> Set.fromList $ zip p1 p2
   _ -> Set.empty
 
 trigramsOf :: Text -> Set (Char, Char, Char)
-trigramsOf txt = case Text.unpack txt of
+trigramsOf txt = case Text.unpack (Text.toLower txt) of
   p1@(_ : p2@(_ : p3)) -> Set.fromList $ zip3 p1 p2 p3
   _ -> Set.empty
 
@@ -73,10 +65,12 @@ iiSearch txt InvertedIndex {iiElems, iiUnigrams, iiBigrams, iiTrigrams}
   | Text.length txt == 2 = using bigramsOf iiBigrams
   | otherwise = using trigramsOf iiTrigrams
   where
+    lowerTxt = Text.toLower txt
     using :: Ord a => (Text -> Set a) -> Map a (Set Text) -> Set Text
     using getGrams m =
       Map.intersection m (setToMap () (getGrams txt))
         & Map.elems
         & \case
           [] -> Set.empty
-          (x : xs) -> foldl' Set.intersection x xs
+          x : xs -> foldl' Set.intersection x xs
+        & Set.filter (\t -> lowerTxt `Text.isInfixOf` Text.toLower t)
